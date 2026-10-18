@@ -1743,6 +1743,10 @@ function DustyNPCClass:Spawn(avatar, displayName)
     self.Pending[record] = true
     local ok, err = xpcall(function()
         record.UserId = self:ResolveAvatar(avatar)
+        
+        if type(avatar) == "string" and avatar ~= "" and not tonumber(avatar) then
+            record.Username = avatar
+        end
         assert(generation == self.Generation and not record.Disposed and self.Active,
             "Spawn cancelled.")
         local model = self:LoadAvatar(record.UserId, record)
@@ -3273,6 +3277,7 @@ local function buildDustyPeopleCard(record)
     dots.TextXAlignment = Enum.TextXAlignment.Center
     dots.TextYAlignment = Enum.TextYAlignment.Center
     dots.AutoButtonColor = false
+    dots.Active = false
     dots.Visible = false
     dots.ZIndex = 10
     dots.Parent = card
@@ -3294,10 +3299,9 @@ local function buildDustyPeopleCard(record)
 
     local nameL = Instance.new("TextLabel")
     nameL.Name               = "Name"
-    nameL.Size               = UDim2.fromOffset(129, 18)
+    nameL.Size               = UDim2.fromOffset(88, 18)
     nameL.Position           = UDim2.fromOffset(8, 155)
     nameL.BackgroundTransparency = 1
-    nameL.Text               = getDustyDisplayName(record)
     nameL.TextColor3         = style.NameColor
     nameL.TextSize           = style.NameSize
     nameL.FontFace           = style.NameFont
@@ -3309,10 +3313,9 @@ local function buildDustyPeopleCard(record)
 
     local handle = Instance.new("TextLabel")
     handle.Name               = "Handle"
-    handle.Size               = UDim2.fromOffset(129, 18)
+    handle.Size               = UDim2.fromOffset(88, 18)
     handle.Position           = UDim2.fromOffset(8, 173)
     handle.BackgroundTransparency = 1
-    handle.Text               = "@" .. getDustyUsername(record)
     handle.TextColor3         = style.HandleColor
     handle.TextSize           = style.HandleSize
     handle.FontFace           = style.HandleFont
@@ -3322,6 +3325,47 @@ local function buildDustyPeopleCard(record)
     handle.ZIndex             = 3
     handle.Parent             = card
 
+    if record.IsRealPlayer then
+        nameL.Text = record.Name 
+        handle.Text = "@" .. record.Username 
+    else
+        nameL.Text = record.Name or "NPC"
+        handle.Text = record.Username and ("@" .. record.Username) or "@Loading..."
+        
+        task.spawn(function()
+            local realDisplay = getDustyDisplayName(record)
+            local realUsername = getDustyUsername(record)
+            
+            if card and card.Parent then
+                if realDisplay then
+                    nameL.Text = realDisplay
+                    record.Name = realDisplay
+                end
+                if realUsername then
+                    handle.Text = "@" .. realUsername
+                    record.Username = realUsername
+                end
+            end
+        end)
+    end
+
+    local connectBtn = Instance.new("ImageButton")
+    connectBtn.Name = "ConnectButton"
+    connectBtn.Size = UDim2.fromOffset(40, 40) 
+    connectBtn.Position = UDim2.fromOffset(101, 153) 
+    connectBtn.BackgroundColor3 = Color3.fromRGB(50, 51, 58) 
+    connectBtn.BackgroundTransparency = 0.1
+    connectBtn.Image = "rbxassetid://126421552629261"
+    connectBtn.ImageColor3 = Color3.fromRGB(255, 255, 255)
+    connectBtn.ScaleType = Enum.ScaleType.Fit 
+    connectBtn.AutoButtonColor = false
+    connectBtn.Active = false
+    connectBtn.ZIndex = 5
+    connectBtn.Parent = card
+    
+    local btnCorner = Instance.new("UICorner", connectBtn)
+    btnCorner.CornerRadius = UDim.new(0, 8) 
+
     local avatarZone = Instance.new("TextButton")
     avatarZone.Name = "AvatarZone"
     avatarZone.Size = UDim2.fromOffset(145, 145)
@@ -3329,6 +3373,7 @@ local function buildDustyPeopleCard(record)
     avatarZone.BackgroundTransparency = 1
     avatarZone.Text = ""
     avatarZone.AutoButtonColor = false
+    avatarZone.Active = false
     avatarZone.ZIndex = 5
     avatarZone.Parent = card
 
@@ -3339,6 +3384,7 @@ local function buildDustyPeopleCard(record)
     nickZone.BackgroundTransparency = 1
     nickZone.Text = ""
     nickZone.AutoButtonColor = false
+    nickZone.Active = false
     nickZone.ZIndex = 5
     nickZone.Parent = card
 
@@ -3615,6 +3661,7 @@ local function buildDustyPeopleCard(record)
     end
 
     makeMenuItem("Block", "rbxassetid://73203084512933", 1, function()
+        if record.IsRealPlayer then return end
         showCustomBlockModal(record, card)
     end)
     
@@ -3669,11 +3716,11 @@ end
 local function updateDustyPeopleCard(card, record)
     local nameL  = card:FindFirstChild("Name")
     local handle = card:FindFirstChild("Handle")
-    if nameL then
-        nameL.Text = getDustyDisplayName(record)
+    if nameL and record.Name then
+        nameL.Text = record.Name
     end
-    if handle then
-        handle.Text = "@" .. getDustyUsername(record)
+    if handle and record.Username then
+        handle.Text = "@" .. record.Username
     end
 end
 
@@ -3737,6 +3784,16 @@ local function isDustyPanelStable(container, realCards)
     return true
 end
 
+local SyncCache = {
+    Container = nil,
+    PageView = nil,
+    InnerFrame = nil,
+    Overlay = nil,
+    ClipFrame = nil,
+    LastEntityHash = "",
+    OriginalInnerPos = nil
+}
+
 local function syncDustyPeopleCards()
     local dustyNPC = _G.DustyNPC
     if not dustyNPC or not dustyNPC.Active then
@@ -3744,120 +3801,157 @@ local function syncDustyPeopleCards()
         return
     end
 
-    local container = findDustyPeopleContainer()
+    if not SyncCache.Container or not SyncCache.Container.Parent then
+        SyncCache.Container = findDustyPeopleContainer()
+        SyncCache.PageView = nil
+        SyncCache.InnerFrame = nil
+    end
+    
+    local container = SyncCache.Container
     if not container or not isDustyPeopleContainerVisible(container) then
-        for _, card in pairs(DustyPeopleInjector.Cards) do
-            card.Visible = false
+        if SyncCache.Overlay then
+            local cFrame = SyncCache.Overlay:FindFirstChild("DustyPeopleClipFrame")
+            if cFrame then cFrame.Visible = false end
         end
+        for _, card in pairs(DustyPeopleInjector.Cards) do card.Visible = false end
         return
     end
 
-    local realCards = getDustyRealPeopleCards(container)
-    if #realCards == 0 then
-        for _, card in pairs(DustyPeopleInjector.Cards) do
-            card.Visible = false
+    if not SyncCache.PageView or not SyncCache.PageView.Parent then
+        local cur = container
+        while cur and cur ~= DustyPeopleCoreGui do
+            if cur.Name == "PageView" and cur:IsA("ScrollingFrame") then
+                SyncCache.PageView = cur
+                break
+            end
+            cur = cur.Parent
         end
-        return
+    end
+    local pageView = SyncCache.PageView
+    if not pageView then return end
+
+    if not SyncCache.InnerFrame or not SyncCache.InnerFrame.Parent then
+        SyncCache.InnerFrame = pageView:FindFirstChild("PageViewInnerFrame")
+    end
+    local innerFrame = SyncCache.InnerFrame
+    if not innerFrame then return end
+
+    if not SyncCache.OriginalInnerPos then
+        SyncCache.OriginalInnerPos = innerFrame.Position
     end
 
-    local firstReal = realCards[1]
-    local firstPos = firstReal.AbsolutePosition
-    if firstPos.X <= 0 or firstPos.Y <= 0
-        or firstReal.AbsoluteSize.X <= 0 then
-        for _, card in pairs(DustyPeopleInjector.Cards) do
-            card.Visible = false
+    if not SyncCache.Overlay or not SyncCache.Overlay.Parent then
+        SyncCache.Overlay = DustyPeopleCoreGui:FindFirstChild("DustyPeopleNativeCardOverlay")
+        if not SyncCache.Overlay then
+            SyncCache.Overlay = Instance.new("ScreenGui")
+            SyncCache.Overlay.Name            = "DustyPeopleNativeCardOverlay"
+            SyncCache.Overlay.ResetOnSpawn    = false
+            SyncCache.Overlay.IgnoreGuiInset  = false
+            SyncCache.Overlay.DisplayOrder    = 100
+            SyncCache.Overlay.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
+            SyncCache.Overlay.Parent          = DustyPeopleCoreGui
         end
-        return
     end
 
-    local overlay = DustyPeopleCoreGui:FindFirstChild(
-        "DustyPeopleNativeCardOverlay"
-    )
-    if not overlay then
-        overlay = Instance.new("ScreenGui")
-        overlay.Name            = "DustyPeopleNativeCardOverlay"
-        overlay.ResetOnSpawn    = false
-        overlay.IgnoreGuiInset  = false
-        overlay.DisplayOrder    = 100
-        overlay.ZIndexBehavior  = Enum.ZIndexBehavior.Sibling
-        overlay.Parent          = DustyPeopleCoreGui
+    if not SyncCache.ClipFrame or not SyncCache.ClipFrame.Parent then
+        SyncCache.ClipFrame = SyncCache.Overlay:FindFirstChild("DustyPeopleClipFrame")
+        if not SyncCache.ClipFrame then
+            SyncCache.ClipFrame = Instance.new("ScrollingFrame")
+            SyncCache.ClipFrame.Name = "DustyPeopleClipFrame"
+            SyncCache.ClipFrame.BackgroundTransparency = 1
+            SyncCache.ClipFrame.BorderSizePixel = 0
+            SyncCache.ClipFrame.ScrollBarThickness = 6 
+            SyncCache.ClipFrame.ScrollBarImageColor3 = Color3.fromRGB(180, 180, 180)
+            SyncCache.ClipFrame.ScrollingDirection = Enum.ScrollingDirection.Y
+            SyncCache.ClipFrame.Active = true
+            SyncCache.ClipFrame.ZIndex = 10
+            SyncCache.ClipFrame.Parent = SyncCache.Overlay
+        end
     end
 
-    local activeRecords = {}
-    for id, record in pairs(dustyNPC.Records) do
-        if not record.Disposed
-            and record.Name
-            and record.Model
-            and record.Model.Parent then
-            local key = tostring(record.Id or id)
-            activeRecords[key] = record
+    local clipFrame = SyncCache.ClipFrame
+    clipFrame.Visible = true
+    clipFrame.Position = UDim2.fromOffset(pageView.AbsolutePosition.X, pageView.AbsolutePosition.Y)
+    clipFrame.Size = UDim2.fromOffset(pageView.AbsoluteSize.X, pageView.AbsoluteSize.Y)
+    local origPos = SyncCache.OriginalInnerPos
+    innerFrame.Position = UDim2.new(origPos.X.Scale, origPos.X.Offset, origPos.Y.Scale, origPos.Y.Offset - clipFrame.CanvasPosition.Y)
+    local allEntities = {}
+    local hashString = ""
+    
+    for _, p in ipairs(Players:GetPlayers()) do
+        table.insert(allEntities, { IsRealPlayer = true, UserId = p.UserId, Name = p.DisplayName, Username = p.Name })
+        hashString = hashString .. tostring(p.UserId) .. "_"
+    end
+    for _, record in pairs(dustyNPC.Records) do
+        if not record.Disposed and record.Name and record.Model and record.Model.Parent then
+            table.insert(allEntities, record)
+            hashString = hashString .. tostring(record.UserId or record.Id) .. "_"
+        end
+    end
+
+    local isDataChanged = (hashString ~= SyncCache.LastEntityHash)
+
+    if isDataChanged then
+        SyncCache.LastEntityHash = hashString
+
+        for _, child in ipairs(container:GetChildren()) do
+            if child:IsA("GuiObject") and child.Name:match("^VirtualizedItem_%d+$") then
+                child.Visible = false
+            end
+        end
+
+        for key, card in pairs(DustyPeopleInjector.Cards) do
+            local found = false
+            for _, ent in ipairs(allEntities) do
+                local entKey = (ent.IsRealPlayer and "P_" or "N_") .. tostring(ent.UserId or ent.Id)
+                if key == entKey then found = true break end
+            end
+            if not found then
+                card:Destroy()
+                DustyPeopleInjector.Cards[key] = nil
+            end
+        end
+
+        -- 3. RENDER GRID
+        local cardSize = DustyPeopleInjector.Style.Size
+        local gapX, gapY = 12, 12
+        local scrollBarWidth = clipFrame.ScrollBarThickness > 0 and clipFrame.ScrollBarThickness or 0
+        local availableWidth = pageView.AbsoluteSize.X - scrollBarWidth - 4
+        local cols = math.max(1, math.floor((availableWidth + gapX) / (cardSize.X + gapX)))
+        local totalRows = math.ceil(#allEntities / cols)
+        
+        local paddingTop = 133 
+        local paddingLeft = 12
+
+        for i, ent in ipairs(allEntities) do
+            local key = (ent.IsRealPlayer and "P_" or "N_") .. tostring(ent.UserId or ent.Id)
             local card = DustyPeopleInjector.Cards[key]
-            if not card or not card.Parent then
-                card = buildDustyPeopleCard(record)
-                card.Parent = overlay
+
+            if not card then
+                card = buildDustyPeopleCard(ent)
+                card.Parent = clipFrame
                 DustyPeopleInjector.Cards[key] = card
             else
-                updateDustyPeopleCard(card, record)
+                updateDustyPeopleCard(card, ent)
             end
-        end
-    end
 
-    for key in pairs(DustyPeopleInjector.Cards) do
-        if not activeRecords[key] then
-            removeDustyPeopleCard(key)
-        end
-    end
-
-    local lastReal  = realCards[#realCards]
-    local cardSize  = DustyPeopleInjector.Style.Size
-    local lastPos   = lastReal.AbsolutePosition
-    local gapX, gapY = 12, 12
-
-    if #realCards >= 2 then
-        local a = realCards[1].AbsolutePosition
-        local b = realCards[2].AbsolutePosition
-        if math.abs(a.Y - b.Y) < 3 then
-            gapX = math.max(0, b.X - a.X - cardSize.X)
-        end
-    end
-
-    local baseX = lastPos.X + cardSize.X + gapX
-    local baseY = lastPos.Y
-    local containerLeft  = container.AbsolutePosition.X
-    local containerRight = containerLeft + container.AbsoluteSize.X
-    local availInRow     = containerRight - baseX
-    local cardsInFirstRow = math.max(0,
-        math.floor((availInRow + gapX) / (cardSize.X + gapX)))
-    local cardsPerRow = math.max(1,
-        math.floor((container.AbsoluteSize.X + gapX) / (cardSize.X + gapX)))
-    local sortedKeys = {}
-    for key in pairs(activeRecords) do
-        table.insert(sortedKeys, key)
-    end
-    table.sort(sortedKeys, function(a, b)
-        return tonumber(a) < tonumber(b)
-    end)
-
-    for i, key in ipairs(sortedKeys) do
-        local card = DustyPeopleInjector.Cards[key]
-        if card then
             local idx = i - 1
-            local x, y
+            local col = idx % cols
+            local row = math.floor(idx / cols)
 
-            if idx < cardsInFirstRow then
-                x = baseX + idx * (cardSize.X + gapX)
-                y = baseY
-            else
-                local wrapped = idx - cardsInFirstRow
-                local col = wrapped % cardsPerRow
-                local row = math.floor(wrapped / cardsPerRow) + 1
-                x = containerLeft + col * (cardSize.X + gapX)
-                y = baseY + row * (cardSize.Y + gapY)
-            end
+            local x = paddingLeft + col * (cardSize.X + gapX)
+            local y = paddingTop + row * (cardSize.Y + gapY)
 
             card.Position = UDim2.fromOffset(x, y)
-            card.Size     = UDim2.fromOffset(cardSize.X, cardSize.Y)
-            card.Visible  = true
+            card.Size = UDim2.fromOffset(cardSize.X, cardSize.Y)
+            card.Visible = true
+        end
+
+        local totalHeight = paddingTop + (totalRows * (cardSize.Y + gapY)) + 50
+        clipFrame.CanvasSize = UDim2.fromOffset(0, totalHeight)
+    else
+        for _, card in pairs(DustyPeopleInjector.Cards) do
+            card.Visible = true
         end
     end
 end
